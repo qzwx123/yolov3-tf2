@@ -1,3 +1,4 @@
+import io
 import time
 import os
 import hashlib
@@ -5,22 +6,28 @@ import hashlib
 from absl import app, flags, logging
 from absl.flags import FLAGS
 import tensorflow as tf
+import PIL.Image
 import lxml.etree
 import tqdm
 
-flags.DEFINE_string('data_dir', './data/voc2012_raw/VOCdevkit/VOC2012/',
+WORD = 'train'
+
+flags.DEFINE_string('data_dir', r'../data/VOC_MASK',
                     'path to raw PASCAL VOC dataset')
-flags.DEFINE_enum('split', 'train', [
-                  'train', 'val'], 'specify train or val spit')
-flags.DEFINE_string('output_file', './data/voc2012_train.tfrecord', 'outpot dataset')
-flags.DEFINE_string('classes', './data/voc2012.names', 'classes file')
+flags.DEFINE_string('output_file', '../data/voc_mask_{}.record'.format(WORD), 'outpot dataset')
+flags.DEFINE_string('classes', '../data/mask.names', 'classes file')
 
 
 def build_example(annotation, class_map):
     img_path = os.path.join(
         FLAGS.data_dir, 'JPEGImages', annotation['filename'])
-    img_raw = open(img_path, 'rb').read()
-    key = hashlib.sha256(img_raw).hexdigest()
+    with tf.io.gfile.GFile(img_path, 'rb') as fid:
+        encoded_jpg = fid.read()
+    encoded_jpg_io = io.BytesIO(encoded_jpg)
+    image = PIL.Image.open(encoded_jpg_io)
+    if image.format != 'JPEG':
+        raise ValueError(img_path, 'Image format not JPEG')
+    key = hashlib.sha256(encoded_jpg).hexdigest()
 
     width = int(annotation['size']['width'])
     height = int(annotation['size']['height'])
@@ -45,8 +52,14 @@ def build_example(annotation, class_map):
             ymax.append(float(obj['bndbox']['ymax']) / height)
             classes_text.append(obj['name'].encode('utf8'))
             classes.append(class_map[obj['name']])
-            truncated.append(int(obj['truncated']))
-            views.append(obj['pose'].encode('utf8'))
+            if 'truncated' in obj.keys():
+                truncated.append(int(obj['truncated']))
+            else:
+                truncated.append(0)
+            if 'pose' in obj.keys():
+                views.append(obj['pose'].encode('utf8'))
+            else:
+                views.append('Unspecified'.encode('utf8'))
 
     example = tf.train.Example(features=tf.train.Features(feature={
         'image/height': tf.train.Feature(int64_list=tf.train.Int64List(value=[height])),
@@ -56,7 +69,7 @@ def build_example(annotation, class_map):
         'image/source_id': tf.train.Feature(bytes_list=tf.train.BytesList(value=[
             annotation['filename'].encode('utf8')])),
         'image/key/sha256': tf.train.Feature(bytes_list=tf.train.BytesList(value=[key.encode('utf8')])),
-        'image/encoded': tf.train.Feature(bytes_list=tf.train.BytesList(value=[img_raw])),
+        'image/encoded': tf.train.Feature(bytes_list=tf.train.BytesList(value=[encoded_jpg])),
         'image/format': tf.train.Feature(bytes_list=tf.train.BytesList(value=['jpeg'.encode('utf8')])),
         'image/object/bbox/xmin': tf.train.Feature(float_list=tf.train.FloatList(value=xmin)),
         'image/object/bbox/xmax': tf.train.Feature(float_list=tf.train.FloatList(value=xmax)),
@@ -93,10 +106,10 @@ def main(_argv):
 
     writer = tf.io.TFRecordWriter(FLAGS.output_file)
     image_list = open(os.path.join(
-        FLAGS.data_dir, 'ImageSets', 'Main', 'aeroplane_%s.txt' % FLAGS.split)).read().splitlines()
+        FLAGS.data_dir, 'ImageSets', 'Main', '{}.txt'.format(WORD))).read().splitlines()
     logging.info("Image list loaded: %d", len(image_list))
     for image in tqdm.tqdm(image_list):
-        name, _ = image.split()
+        name = image
         annotation_xml = os.path.join(
             FLAGS.data_dir, 'Annotations', name + '.xml')
         annotation_xml = lxml.etree.fromstring(open(annotation_xml).read())
